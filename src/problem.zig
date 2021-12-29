@@ -42,17 +42,23 @@ pub fn parse_dimacs_cnf_file(gpa: Allocator, file_path: []const u8) !ProblemSpec
     const file_buffer = try cur_dir.readFileAlloc(gpa, file_path, constants.@"1 GB");
     defer gpa.free(file_buffer);
 
-    log.debug("{s}:\n{s}", .{ file_path, file_buffer });
+    // log.debug("{s}:\n{s}", .{ file_path, file_buffer });
 
     var lines = std.mem.split(u8, file_buffer, "\n");
-    var lineno: u32 = 0;
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const allocator = arena.allocator();
     var problem_spec: ProblemSpec = .{ .num_clauses = 0, .num_variables = 0, .arena = arena, .allocator = allocator, .clauses = ArrayListUnmanaged(Clause){}, .literal_frequency = ArrayList(Literal).init(allocator) };
 
+    var lineno: u32 = 0;
     while (lines.next()) |line| {
-        var tokens = std.mem.tokenize(u8, line, " ");
+        const mutable_line = try allocator.alloc(u8, line.len);
+        defer allocator.free(mutable_line);
+        std.mem.copy(u8, mutable_line, line);
+
+        std.mem.replaceScalar(u8, mutable_line, '\t', ' ');
+
+        var tokens = std.mem.tokenize(u8, mutable_line, " ");
         if (tokens.buffer.len == 0) {
             continue;
         }
@@ -61,6 +67,10 @@ pub fn parse_dimacs_cnf_file(gpa: Allocator, file_path: []const u8) !ProblemSpec
         // Skip over any comments
         if (first_char == 'c') {
             continue;
+        }
+
+        if (first_char == '%') {
+            break;
         }
 
         if (lineno == 0) {

@@ -17,7 +17,18 @@ const Clause = base.Clause;
 
 var rng_factory = std.rand.DefaultPrng.init(0);
 
-pub const VariableDecisionPolicy = enum { random };
+// Variable Decision Policies
+
+// cVSIDS: The activities of variables occurring in the newest learnt clause are
+// bumped up by 1, immediately after the clause is learnt. The activities of all
+// variables are multiplied by a constant 0 < α < 1. The decay occurs after every i
+// conflicts. We follow the policy used in recent solvers like MiniSAT and use i = 1.
+
+// mVSIDS: The activities of all variables resolved during conflict analysis that
+// lead to the learnt clause (including the variables in the learnt clause) are bumped
+// up by 1. The activities of all variables are decayed as in cVSIDS.
+
+pub const VariableDecisionPolicy = enum { random, mVSIDS };
 
 pub const SolverResult = enum { sat, unsat, unknown };
 
@@ -28,55 +39,61 @@ const AnalyzeClauseResult = enum { unit, unsat, sat, non_unit };
 
 pub const SolverConfig = struct {
     variable_decision_policy: VariableDecisionPolicy,
+    vsids_decay_alpha: f32,
 };
 
 pub const CDCL = struct {
     config: SolverConfig,
-    main_arena_allocator_factory: std.heap.ArenaAllocator,
+    main_arena_allocator: std.heap.ArenaAllocator,
     allocator: Allocator,
     problem_spec: ProblemSpec,
     variable_assignments: ArrayListUnmanaged(VariableAssignment),
     variable_decision_levels: ArrayListUnmanaged(i16),
     variable_antecedent_clause_ids: ArrayListUnmanaged(?usize),
+    variable_activity: ArrayListUnmanaged(f32),
     num_assigned_variables: u32,
     rng: std.rand.Random,
 
-    pub fn init(base_allocator: Allocator, problem_spec: ProblemSpec, solver_config: SolverConfig) !CDCL {
-        //         var _gpa = std.heap.GeneralPurposeAllocator(.{}){};
-        //         var gpa = _gpa.allocator();
+    pub fn init(self: *CDCL, problem_spec: ProblemSpec, solver_config: SolverConfig) !void {
 
         // Handle random number generation
         const rng = rng_factory.random();
 
-        var cdcl_solver = CDCL{
-            .config = solver_config,
-            .main_arena_allocator_factory = std.heap.ArenaAllocator.init(base_allocator),
-            .allocator = undefined,
-            .problem_spec = problem_spec,
-            .variable_assignments = ArrayListUnmanaged(VariableAssignment){},
-            .variable_decision_levels = ArrayListUnmanaged(i16){},
-            .variable_antecedent_clause_ids = ArrayListUnmanaged(?usize){},
-            .num_assigned_variables = 0,
-            .rng = rng,
-        };
+        self.config = solver_config;
+        self.main_arena_allocator = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        self.allocator = self.main_arena_allocator.allocator();
+        self.problem_spec = problem_spec;
+        self.variable_assignments = ArrayListUnmanaged(VariableAssignment){};
+        self.variable_decision_levels = ArrayListUnmanaged(i16){};
+        self.variable_antecedent_clause_ids = ArrayListUnmanaged(?usize){};
+        self.variable_activity = ArrayListUnmanaged(f32){};
+        self.num_assigned_variables = 0;
+        self.rng = rng;
 
-        cdcl_solver.allocator = cdcl_solver.main_arena_allocator_factory.allocator();
-
-        try cdcl_solver.variable_assignments.appendNTimes(cdcl_solver.allocator, VariableAssignment.unassigned, problem_spec.num_variables);
-        try cdcl_solver.variable_decision_levels.appendNTimes(cdcl_solver.allocator, -1, problem_spec.num_variables);
-        try cdcl_solver.variable_antecedent_clause_ids.appendNTimes(cdcl_solver.allocator, null, problem_spec.num_variables);
-
-        return cdcl_solver;
+        try self.variable_assignments.appendNTimes(self.allocator, VariableAssignment.unassigned, problem_spec.num_variables);
+        try self.variable_decision_levels.appendNTimes(self.allocator, -1, problem_spec.num_variables);
+        try self.variable_antecedent_clause_ids.appendNTimes(self.allocator, null, problem_spec.num_variables);
+        try self.variable_activity.appendNTimes(self.allocator, 0, problem_spec.num_variables);
     }
 
     pub fn deinit(self: *CDCL) void {
-        log.debug("Called deinit", .{});
         self.problem_spec.arena.deinit();
-        // self.arena.deinit();
+        self.main_arena_allocator.deinit();
     }
 
     pub fn all_variables_assigned(self: *const CDCL) bool {
         return self.num_assigned_variables == self.problem_spec.num_variables;
+    }
+
+    fn decay_all_variables_activity(self: *CDCL) void {
+        switch (self.config.variable_decision_policy) {
+            VariableDecisionPolicy.mVSIDS => {
+                for (self.variable_activity.items) |*activity| {
+                    activity.* *= self.config.vsids_decay_alpha;
+                }
+            },
+            else => {},
+        }
     }
 
     fn decide_branching_variable_random_policy(self: *const CDCL) Literal {
@@ -89,12 +106,42 @@ pub const CDCL = struct {
         }
     }
 
+    fn decide_branching_variable_mVSIDS_policy(self: *const CDCL) Literal {
+        const decided_polarity = self.rng.enumValue(Polarity);
+
+        var max_activity_variable_id: ?usize = null;
+        var max_activity: f32 = 0;
+        for (self.variable_assignments.items) |variable_assignment, variable_id| {
+            switch (variable_assignment) {
+                VariableAssignment.unassigned => {
+                    const activity = self.variable_activity.items[variable_id];
+                    if (max_activity < activity) {
+                        max_activity = activity;
+                        max_activity_variable_id = variable_id;
+                    } else if (max_activity_variable_id == null) {
+                        max_activity_variable_id = variable_id;
+                    }
+                },
+                else => {},
+            }
+        }
+        return Literal{ .id = @intCast(u16, max_activity_variable_id.?), .polarity = decided_polarity };
+    }
+
     fn decide_branching_variable(self: *const CDCL) Literal {
+        var decided_variable: Literal = undefined;
+
         switch (self.config.variable_decision_policy) {
             VariableDecisionPolicy.random => {
-                return self.decide_branching_variable_random_policy();
+                decided_variable = self.decide_branching_variable_random_policy();
+            },
+            VariableDecisionPolicy.mVSIDS => {
+                decided_variable = self.decide_branching_variable_mVSIDS_policy();
             },
         }
+
+        assert(self.variable_assignments.items[decided_variable.id] == VariableAssignment.unassigned);
+        return decided_variable;
     }
 
     fn analyze_clause(self: *const CDCL, clause: *const ArrayListUnmanaged(Literal), unset_literal: *?Literal) AnalyzeClauseResult {
@@ -191,7 +238,7 @@ pub const CDCL = struct {
         return result;
     }
 
-    fn resolve_conflicts(self: *const CDCL, decision_level: i16, conflict_clause_id: usize) !Clause {
+    fn resolve_conflicts(self: *CDCL, decision_level: i16, conflict_clause_id: usize) !Clause {
         _ = self;
         _ = decision_level;
         _ = conflict_clause_id;
@@ -210,6 +257,8 @@ pub const CDCL = struct {
         while (true) {
             num_literals_at_this_decision_level = 0;
 
+            log.debug("length of clause: {}", .{new_learnt_clause.items.len});
+
             for (new_learnt_clause.items) |literal| {
                 if (self.variable_decision_levels.items[literal.id] == decision_level) {
                     num_literals_at_this_decision_level += 1;
@@ -224,7 +273,26 @@ pub const CDCL = struct {
 
             const antecedent_clause_id_of_selected_literal: usize = self.variable_antecedent_clause_ids.items[literal_used_to_resolve.?.id].?;
             const antecedent_clause_of_selected_literal = self.problem_spec.clauses.items[antecedent_clause_id_of_selected_literal];
+
+            // Handles VSIDS updates
+            switch (self.config.variable_decision_policy) {
+                VariableDecisionPolicy.mVSIDS => {
+                    self.variable_activity.items[literal_used_to_resolve.?.id] += 1;
+                },
+                else => {},
+            }
+
             new_learnt_clause = try self.resolve_conflict(new_learnt_clause, antecedent_clause_of_selected_literal, literal_used_to_resolve.?);
+        }
+
+        // Handles VSIDS updates
+        switch (self.config.variable_decision_policy) {
+            VariableDecisionPolicy.mVSIDS => {
+                for (new_learnt_clause.items) |literal| {
+                    self.variable_activity.items[literal.id] += 1;
+                }
+            },
+            else => {},
         }
 
         return new_learnt_clause;
@@ -279,7 +347,9 @@ pub const CDCL = struct {
         }
 
         while (!self.all_variables_assigned()) {
-            log.debug("num_assigned_variables: {}", .{self.num_assigned_variables});
+            if (self.problem_spec.clauses.items.len % 10 == 0) {
+                std.debug.print("num_assigned_variables: {}, num_clauses: {}, decision_level: {}\n", .{ self.num_assigned_variables, self.problem_spec.clauses.items.len, decision_level });
+            }
             const decided_variable: Literal = self.decide_branching_variable();
 
             decision_level += 1;
@@ -298,8 +368,11 @@ pub const CDCL = struct {
                         if (decision_level == 0) {
                             return SolverResult.unsat;
                         }
+
+                        self.decay_all_variables_activity();
+
                         // We are at a deeper decision level, thus we must
-                        // learn new clauses from thsi conflict and backtrack to an earlier decision
+                        // learn new clauses from this conflict and backtrack to an earlier decision
                         // level
                         decision_level = try self.conflict_analysis_and_backtrack(decision_level, conflict_clause_id);
                     },
