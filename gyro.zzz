@@ -1,0 +1,20 @@
+pkgs:
+  tajzia:
+    version: 0.0.0
+    license: GPL-2.0
+    source_url: "https://github.com/typon/tajzia"
+    root: src/main.zig
+    files:
+      README.md
+      LICENSE
+deps:
+  sqlite:
+    git:
+      url: "https://github.com/vrischmann/zig-sqlite.git"
+      ref: master
+      root: sqlite.zig
+  clap:
+    git:
+      url: "https://github.com/Hejsil/zig-clap.git"
+      ref: master
+      root: clap.zig

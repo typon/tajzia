@@ -1,4 +1,5 @@
-zig-cache
-zig-out
 all_benchmarks
+zig-*
+.zigmod
+deps.zig
 .vscode

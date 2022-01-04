@@ -1,21 +1,14 @@
 const std = @import("std");
-
-const pkgs = struct {
-    const clap = std.build.Pkg{
-        .name = "clap",
-        .path = .{ .path = "./zig-clap-0.5.0/clap.zig" },
-        .dependencies = &[_]std.build.Pkg{},
-    };
-};
+const pkgs = @import("deps.zig").pkgs;
 
 pub fn build(b: *std.build.Builder) void {
     // Standard release options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const mode = b.standardReleaseOptions();
 
-    const lib = b.addStaticLibrary("tajzia", "src/main.zig");
+    const lib = b.addStaticLibrary("tajzia", "src/lib.zig");
     lib.setBuildMode(mode);
-    lib.addPackage(pkgs.clap);
+    pkgs.addAllTo(lib);
     lib.install();
 
     const main_tests = b.addTest("src/main.zig");
@@ -28,8 +21,8 @@ pub fn build(b: *std.build.Builder) void {
     const exe = b.addExecutable("tajzia.exe", "src/main.zig");
     exe.setTarget(target);
     exe.linkLibrary(lib);
-    exe.addPackage(pkgs.clap);
     exe.setBuildMode(mode);
+    pkgs.addAllTo(exe);
     exe.install();
 
     const run_cmd = exe.run();
