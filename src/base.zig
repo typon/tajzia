@@ -15,6 +15,11 @@ pub const VariableAssignment = enum(u8) {
 pub const Literal = packed struct {
     id: u16,
     polarity: Polarity,
+
+    pub fn less_than(context: void, lhs: Literal, rhs: Literal) bool {
+        _ = context;
+        return lhs.id < rhs.id;
+    }
 };
 
 pub const Clause = ArrayListUnmanaged(Literal);

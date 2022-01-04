@@ -1,5 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
+const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const AutoArrayHashMap = std.AutoArrayHashMap;
@@ -28,6 +29,8 @@ var rng_factory = std.rand.DefaultPrng.init(0);
 // lead to the learnt clause (including the variables in the learnt clause) are bumped
 // up by 1. The activities of all variables are decayed as in cVSIDS.
 
+pub const SolverRestartPolicy = union(enum) { EveryNLearnedClauses: struct { n: usize, counter: usize } };
+
 pub const VariableDecisionPolicy = enum { random, mVSIDS };
 
 pub const SolverResult = enum { sat, unsat, unknown };
@@ -38,6 +41,7 @@ const UnitPropagateResult = union(enum) { found_unsat_clause: usize, otherwise }
 const AnalyzeClauseResult = enum { unit, unsat, sat, non_unit };
 
 pub const SolverConfig = struct {
+    solver_restart_policy: SolverRestartPolicy,
     variable_decision_policy: VariableDecisionPolicy,
     vsids_decay_alpha: f32,
 };
@@ -51,6 +55,7 @@ pub const CDCL = struct {
     variable_decision_levels: ArrayListUnmanaged(i16),
     variable_antecedent_clause_ids: ArrayListUnmanaged(?usize),
     variable_activity: ArrayListUnmanaged(f32),
+    variable_activity_backup: ArrayListUnmanaged(f32),
     num_assigned_variables: u32,
     rng: std.rand.Random,
 
@@ -67,6 +72,7 @@ pub const CDCL = struct {
         self.variable_decision_levels = ArrayListUnmanaged(i16){};
         self.variable_antecedent_clause_ids = ArrayListUnmanaged(?usize){};
         self.variable_activity = ArrayListUnmanaged(f32){};
+        self.variable_activity_backup = ArrayListUnmanaged(f32){};
         self.num_assigned_variables = 0;
         self.rng = rng;
 
@@ -74,6 +80,7 @@ pub const CDCL = struct {
         try self.variable_decision_levels.appendNTimes(self.allocator, -1, problem_spec.num_variables);
         try self.variable_antecedent_clause_ids.appendNTimes(self.allocator, null, problem_spec.num_variables);
         try self.variable_activity.appendNTimes(self.allocator, 0, problem_spec.num_variables);
+        try self.variable_activity_backup.appendNTimes(self.allocator, 0, problem_spec.num_variables);
     }
 
     pub fn deinit(self: *CDCL) void {
@@ -88,12 +95,25 @@ pub const CDCL = struct {
     fn decay_all_variables_activity(self: *CDCL) void {
         switch (self.config.variable_decision_policy) {
             VariableDecisionPolicy.mVSIDS => {
-                for (self.variable_activity.items) |*activity| {
-                    activity.* *= self.config.vsids_decay_alpha;
+                for (self.variable_activity.items) |*activity, variable_id| {
+                    if (activity.* != -1) {
+                        activity.* *= self.config.vsids_decay_alpha;
+                    }
+                    self.variable_activity_backup.items[variable_id] *= self.config.vsids_decay_alpha;
                 }
             },
             else => {},
         }
+    }
+
+    fn print_variable_activity(self: *const CDCL) void {
+        for (self.variable_activity.items) |activity| {
+            if (activity == -1) {
+                continue;
+            }
+            print("{}, ", .{activity});
+        }
+        print("\n", .{});
     }
 
     fn decide_branching_variable_random_policy(self: *const CDCL) Literal {
@@ -108,24 +128,28 @@ pub const CDCL = struct {
 
     fn decide_branching_variable_mVSIDS_policy(self: *const CDCL) Literal {
         const decided_polarity = self.rng.enumValue(Polarity);
-
-        var max_activity_variable_id: ?usize = null;
-        var max_activity: f32 = 0;
-        for (self.variable_assignments.items) |variable_assignment, variable_id| {
-            switch (variable_assignment) {
-                VariableAssignment.unassigned => {
-                    const activity = self.variable_activity.items[variable_id];
-                    if (max_activity < activity) {
-                        max_activity = activity;
-                        max_activity_variable_id = variable_id;
-                    } else if (max_activity_variable_id == null) {
-                        max_activity_variable_id = variable_id;
-                    }
-                },
-                else => {},
+        var max_activity_variable_id: i32 = -1;
+        var max_activity: f32 = -0.5;
+        for (self.variable_activity.items) |activity, variable_id| {
+            if (max_activity < activity) {
+                max_activity = activity;
+                max_activity_variable_id = @intCast(i32, variable_id);
             }
         }
-        return Literal{ .id = @intCast(u16, max_activity_variable_id.?), .polarity = decided_polarity };
+        assert(max_activity_variable_id != -1.0);
+        return Literal{ .id = @intCast(u16, max_activity_variable_id), .polarity = decided_polarity };
+    }
+
+    fn decide_branching_variable_first_available(self: *const CDCL) Literal {
+        var decided_var_id: i32 = -1;
+
+        for (self.variable_activity.items) |activity, variable_id| {
+            if (activity != -1) {
+                decided_var_id = @intCast(i32, variable_id);
+                break;
+            }
+        }
+        return Literal{ .id = @intCast(u16, decided_var_id), .polarity = Polarity.positive };
     }
 
     fn decide_branching_variable(self: *const CDCL) Literal {
@@ -178,6 +202,9 @@ pub const CDCL = struct {
         self.variable_decision_levels.items[unset_literal.id] = decision_level;
         self.variable_antecedent_clause_ids.items[unset_literal.id] = clause_id;
 
+        // Set it's activity level such that it can't be selected by mVSIDS
+        self.variable_activity.items[unset_literal.id] = -1;
+
         self.num_assigned_variables += 1;
     }
 
@@ -185,6 +212,7 @@ pub const CDCL = struct {
         self.variable_assignments.items[variable_id] = VariableAssignment.unassigned;
         self.variable_decision_levels.items[variable_id] = -1;
         self.variable_antecedent_clause_ids.items[variable_id] = null;
+        self.variable_activity.items[variable_id] = self.variable_activity_backup.items[variable_id];
 
         self.num_assigned_variables -= 1;
     }
@@ -232,17 +260,30 @@ pub const CDCL = struct {
         }
 
         var result = Clause{};
+
         for (literal_set.keys()) |literal| {
             try result.append(self.allocator, literal);
         }
+
+        // TODO(hfarooq): Do we need a sort here?
+        // std.sort.sort(Literal, result.items, {}, Literal.less_than);
+
         return result;
     }
 
-    fn resolve_conflicts(self: *CDCL, decision_level: i16, conflict_clause_id: usize) !Clause {
-        _ = self;
-        _ = decision_level;
-        _ = conflict_clause_id;
+    fn print_clause(clause: Clause) void {
+        for (clause.items) |variable| {
+            if (variable.polarity == Polarity.positive) {
+                std.debug.print("+", .{});
+            } else {
+                std.debug.print("-", .{});
+            }
+            std.debug.print("{} ", .{variable.id + 1});
+        }
+        std.debug.print("\n", .{});
+    }
 
+    fn resolve_conflicts(self: *CDCL, decision_level: i16, conflict_clause_id: usize) !Clause {
         // Visit all the literals of the learnt clause, examining each literal.
         // If the literal has an antecedent clause AND it was assigned at the current decision level,
         // then we can resolve the literal's antecedent clause with our currently-being-learned conflict clause.
@@ -252,12 +293,11 @@ pub const CDCL = struct {
 
         var num_literals_at_this_decision_level: u32 = 0;
         var literal_used_to_resolve: ?Literal = null;
+
         var new_learnt_clause: Clause = try ArrayListUtils.clone(Clause, self.allocator, self.problem_spec.clauses.items[conflict_clause_id]);
 
         while (true) {
             num_literals_at_this_decision_level = 0;
-
-            log.debug("length of clause: {}", .{new_learnt_clause.items.len});
 
             for (new_learnt_clause.items) |literal| {
                 if (self.variable_decision_levels.items[literal.id] == decision_level) {
@@ -277,7 +317,10 @@ pub const CDCL = struct {
             // Handles VSIDS updates
             switch (self.config.variable_decision_policy) {
                 VariableDecisionPolicy.mVSIDS => {
-                    self.variable_activity.items[literal_used_to_resolve.?.id] += 1;
+                    if (self.variable_activity.items[literal_used_to_resolve.?.id] != -1.0) {
+                        self.variable_activity.items[literal_used_to_resolve.?.id] += 1;
+                    }
+                    self.variable_activity_backup.items[literal_used_to_resolve.?.id] += 1;
                 },
                 else => {},
             }
@@ -289,7 +332,10 @@ pub const CDCL = struct {
         switch (self.config.variable_decision_policy) {
             VariableDecisionPolicy.mVSIDS => {
                 for (new_learnt_clause.items) |literal| {
-                    self.variable_activity.items[literal.id] += 1;
+                    if (self.variable_activity.items[literal.id] != -1.0) {
+                        self.variable_activity.items[literal.id] += 1;
+                    }
+                    self.variable_activity_backup.items[literal.id] += 1;
                 }
             },
             else => {},
@@ -324,18 +370,40 @@ pub const CDCL = struct {
     }
 
     fn conflict_analysis_and_backtrack(self: *CDCL, decision_level: i16, conflict_clause_id: usize) !i16 {
-        _ = self;
-        _ = conflict_clause_id;
-
         const new_learnt_clause: Clause = try self.resolve_conflicts(decision_level, conflict_clause_id);
         try self.problem_spec.clauses.append(self.allocator, new_learnt_clause);
+        switch (self.config.solver_restart_policy) {
+            SolverRestartPolicy.EveryNLearnedClauses => |*every_n_learned_clauses_policy| {
+                every_n_learned_clauses_policy.*.counter += 1;
+            },
+        }
 
         return self.backtrack(decision_level, &new_learnt_clause);
     }
 
-    pub fn solve(self: *CDCL) !SolverResult {
-        _ = self;
+    fn restart_solver(self: *CDCL, decision_level: i16) i16 {
+        var new_decision_level = decision_level;
 
+        switch (self.config.solver_restart_policy) {
+            SolverRestartPolicy.EveryNLearnedClauses => |*every_n_learned_clauses_policy| {
+                if (every_n_learned_clauses_policy.counter > every_n_learned_clauses_policy.n) {
+                    every_n_learned_clauses_policy.*.counter = 0;
+
+                    new_decision_level = 0;
+
+                    for (self.variable_assignments.items) |variable_assignment, variable_id| {
+                        if (variable_assignment != VariableAssignment.unassigned) {
+                            self.unassign_variable(@intCast(u16, variable_id));
+                        }
+                    }
+                }
+            },
+        }
+
+        return new_decision_level;
+    }
+
+    pub fn solve(self: *CDCL) !SolverResult {
         var decision_level: i16 = 0;
 
         // Do initial unit prop to find any conflicts immediately
@@ -347,10 +415,13 @@ pub const CDCL = struct {
         }
 
         while (!self.all_variables_assigned()) {
-            if (self.problem_spec.clauses.items.len % 10 == 0) {
-                std.debug.print("num_assigned_variables: {}, num_clauses: {}, decision_level: {}\n", .{ self.num_assigned_variables, self.problem_spec.clauses.items.len, decision_level });
-            }
+            decision_level = self.restart_solver(decision_level);
+
+            self.print_variable_activity();
+            std.debug.print("num_assigned_variables: {}, num_clauses: {}, decision_level: {}\n", .{ self.num_assigned_variables, self.problem_spec.clauses.items.len, decision_level });
             const decided_variable: Literal = self.decide_branching_variable();
+
+            std.debug.print("picked variable: {}\n", .{decided_variable.id + 1});
 
             decision_level += 1;
 

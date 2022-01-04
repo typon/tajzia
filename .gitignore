@@ -1,2 +1,4 @@
 zig-cache
 zig-out
+all_benchmarks
+.vscode

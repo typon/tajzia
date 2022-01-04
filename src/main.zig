@@ -17,6 +17,7 @@ const ProblemSpec = problem.ProblemSpec;
 const SolverConfig = solvers.SolverConfig;
 const CDCLSolver = solvers.CDCL;
 const VariableDecisionPolicy = solvers.VariableDecisionPolicy;
+const SolverRestartPolicy = solvers.SolverRestartPolicy;
 const SolverResult = solvers.SolverResult;
 
 const log_empty_line = utils.log_empty_line;
@@ -56,7 +57,7 @@ pub fn main() !void {
     const problem_spec: ProblemSpec = try parse_dimacs_cnf_file(gpa.allocator(), file_path);
     problem_spec.dump();
 
-    const solver_config = SolverConfig{ .variable_decision_policy = VariableDecisionPolicy.mVSIDS, .vsids_decay_alpha = 0.1 };
+    const solver_config = SolverConfig{ .variable_decision_policy = VariableDecisionPolicy.mVSIDS, .solver_restart_policy = SolverRestartPolicy{ .EveryNLearnedClauses = .{ .n = 50, .counter = 0 } }, .vsids_decay_alpha = 0.8 };
 
     var cdcl_solver: CDCLSolver = undefined;
     try cdcl_solver.init(problem_spec, solver_config);
@@ -65,8 +66,7 @@ pub fn main() !void {
     const result = cdcl_solver.solve();
     print("result: {}\n", .{result});
     for (cdcl_solver.variable_assignments.items) |assignment, variable_id| {
-        print("{} = {}\n", .{ variable_id, assignment });
-        log.debug("{} = {}", .{ variable_id, assignment });
+        print("{} = {}, ", .{ variable_id, assignment });
     }
 }
 
