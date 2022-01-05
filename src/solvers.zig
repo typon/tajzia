@@ -1,4 +1,5 @@
 const std = @import("std");
+const sqlite = @import("sqlite");
 const assert = std.debug.assert;
 const print = std.debug.print;
 const Allocator = std.mem.Allocator;
@@ -9,6 +10,7 @@ const log = std.log;
 const base = @import("base.zig");
 const problem = @import("problem.zig");
 const utils = @import("utils.zig");
+const DBManager = @import("db.zig").DBManager;
 const ArrayListUtils = utils.ArrayListUtils;
 const ProblemSpec = problem.ProblemSpec;
 const Literal = base.Literal;
@@ -86,6 +88,38 @@ pub const CDCL = struct {
     pub fn deinit(self: *CDCL) void {
         self.problem_spec.arena.deinit();
         self.main_arena_allocator.deinit();
+    }
+
+    pub fn serialize(self: *const CDCL, dbmgr: *DBManager) !void {
+        // Serialize metadata
+        try dbmgr.db.exec("INSERT INTO metadata(version, num_variables, num_clauses, num_assigned_variables) VALUES (?{usize}, ?{u32}, ?{u32}, ?{u32});", .{}, .{ .version = @as(usize, 1), .num_variables = self.problem_spec.num_variables, .num_clauses = self.problem_spec.num_clauses, .num_assigned_variables = self.num_assigned_variables });
+
+        // Serialize clauses
+        for (self.problem_spec.clauses.items) |clause, clause_id| {
+            const bytes = std.mem.sliceAsBytes(clause.items);
+            const clause_as_blob = sqlite.Blob{ .data = bytes };
+            try dbmgr.db.exec("INSERT INTO clauses(id, clause) VALUES (?{usize}, ?{blob});", .{}, .{ .id = clause_id, .clause = clause_as_blob });
+        }
+        // Serialize variable assignments
+        for (self.variable_assignments.items) |variable_assignment, variable_id| {
+            try dbmgr.db.exec("INSERT INTO variable_assignments(id, assignment) VALUES (?{usize}, ?{u8});", .{}, .{ .id = variable_id, .variable_assignment = @enumToInt(variable_assignment) });
+        }
+        // Serialize variable decision levels
+        for (self.variable_decision_levels.items) |decision_level, variable_id| {
+            try dbmgr.db.exec("INSERT INTO variable_decision_levels(id, decision_level) VALUES (?{usize}, ?{i16});", .{}, .{ .id = variable_id, .decision_level = decision_level });
+        }
+        // Serialize variable antecedent clauses
+        for (self.variable_antecedent_clause_ids.items) |clause_id, variable_id| {
+            try dbmgr.db.exec("INSERT INTO variable_antecedent_clause_ids(id, clause_id) VALUES (?{usize}, ?);", .{}, .{ .id = variable_id, .clause_id = clause_id });
+        }
+        // Serialize variable activity
+        for (self.variable_activity.items) |variable_activity, variable_id| {
+            try dbmgr.db.exec("INSERT INTO variable_activity(id, activity) VALUES (?{usize}, ?{f32});", .{}, .{ .id = variable_id, .activity = variable_activity });
+        }
+        // Serialize variable activity backup
+        for (self.variable_activity_backup.items) |variable_activity, variable_id| {
+            try dbmgr.db.exec("INSERT INTO variable_activity_backup(id, activity) VALUES (?{usize}, ?{f32});", .{}, .{ .id = variable_id, .activity = variable_activity });
+        }
     }
 
     pub fn all_variables_assigned(self: *const CDCL) bool {

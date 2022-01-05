@@ -10,9 +10,12 @@ const problem = @import("problem.zig");
 const constants = @import("constants.zig");
 const utils = @import("utils.zig");
 const solvers = @import("solvers.zig");
+const db = @import("db.zig");
 
 const parse_dimacs_cnf_file = problem.parse_dimacs_cnf_file;
 const ProblemSpec = problem.ProblemSpec;
+
+const DBManager = db.DBManager;
 
 const SolverConfig = solvers.SolverConfig;
 const CDCLSolver = solvers.CDCL;
@@ -29,6 +32,7 @@ pub fn main() !void {
     const params = comptime [_]clap.Param(clap.Help){
         clap.parseParam("-h, --help               Display this help and exit.              ") catch unreachable,
         clap.parseParam("-f, --cnf-file <STR>...  Path to .cnf file in DIMACS format.") catch unreachable,
+        clap.parseParam("-r, --overwrite-db ...   Should overwrite database") catch unreachable,
     };
 
     // Initalize our diagnostics, which can be used for reporting useful errors.
@@ -47,23 +51,35 @@ pub fn main() !void {
         return clap.help(std.io.getStdErr().writer(), &params);
     }
 
-    var file_path: []const u8 = undefined;
-    for (args.options("--cnf-file")) |s|
+    if (args.flag("--overwrite-db")) {
+        try std.fs.cwd().deleteFile("tajzia.db");
+    }
+
+    var file_path: ?[]const u8 = null;
+    for (args.options("--cnf-file")) |s| {
         file_path = s;
+    }
+    std.debug.assert(file_path != null);
 
     var gpa = std.heap.GeneralPurposeAllocator(.{ .safety = true }){};
     defer _ = gpa.deinit();
 
-    const problem_spec: ProblemSpec = try parse_dimacs_cnf_file(gpa.allocator(), file_path);
+    const problem_spec: ProblemSpec = try parse_dimacs_cnf_file(gpa.allocator(), file_path.?);
     problem_spec.dump();
 
     const solver_config = SolverConfig{ .variable_decision_policy = VariableDecisionPolicy.mVSIDS, .solver_restart_policy = SolverRestartPolicy{ .EveryNLearnedClauses = .{ .n = 50, .counter = 0 } }, .vsids_decay_alpha = 0.8 };
+
+    var dbmgr: DBManager = undefined;
+    try dbmgr.init("tajzia.db");
 
     var cdcl_solver: CDCLSolver = undefined;
     try cdcl_solver.init(problem_spec, solver_config);
     defer cdcl_solver.deinit();
 
     const result = cdcl_solver.solve();
+
+    try cdcl_solver.serialize(&dbmgr);
+
     print("result: {}\n", .{result});
     for (cdcl_solver.variable_assignments.items) |assignment, variable_id| {
         print("{} = {}, ", .{ variable_id, assignment });
