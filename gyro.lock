@@ -1,2 +1,2 @@
-git https://github.com/vrischmann/zig-sqlite.git master sqlite.zig b77453146b36299ace10da06f2d54264e0b3d376
 git https://github.com/Hejsil/zig-clap.git master clap.zig 802a04a854e65254b0632d9785b2b0f6154686b8
+git https://github.com/vrischmann/zig-sqlite.git master sqlite.zig b77453146b36299ace10da06f2d54264e0b3d376

@@ -6,8 +6,12 @@ pub fn build(b: *std.build.Builder) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const mode = b.standardReleaseOptions();
 
-    const lib = b.addStaticLibrary("tajzia", "src/lib.zig");
+    const lib = b.addStaticLibrary("tajzia", "src/tajzia.zig");
     lib.setBuildMode(mode);
+
+    lib.linkLibC();
+    lib.linkSystemLibrary("sqlite3");
+
     pkgs.addAllTo(lib);
     lib.install();
 
